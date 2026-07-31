@@ -1,0 +1,106 @@
+# nginx front proxy for OpenHost JupyterLab.
+#
+# Substituted at boot by start.sh:
+#   __JUPYTER_TOKEN__  -> the per-boot Jupyter auth token
+#
+# Responsibilities:
+#   * Terminate the OpenHost-routed :8080 connection.
+#   * Proxy HTTP + WebSocket traffic to JupyterLab on 127.0.0.1:8888.
+#   * Serve a static 200 on /_healthz (declared health_check).
+#   * Auto-login the OpenHost owner: on a top-level HTML navigation
+#     where the visitor is the owner (X-OpenHost-Is-Owner: true) and
+#     has no Jupyter cookie yet, 302 them to /lab?token=<TOKEN> so
+#     Jupyter mints its own XSRF/session cookie.  Anonymous visitors
+#     never receive the token and hit Jupyter's own login page (403).
+#
+# Note: the OpenHost router strips the inbound Host header (the app
+# sees Host: 127.0.0.1:8080), so we forward X-Forwarded-Host onward
+# and disable Jupyter host-checking in start.sh instead.
+
+worker_processes 1;
+error_log /dev/stderr warn;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    access_log /dev/stdout;
+
+    # nginx needs writable temp paths; /tmp is always writable.
+    client_body_temp_path /tmp/nginx-client-body;
+    proxy_temp_path       /tmp/nginx-proxy;
+    fastcgi_temp_path     /tmp/nginx-fastcgi;
+    uwsgi_temp_path       /tmp/nginx-uwsgi;
+    scgi_temp_path        /tmp/nginx-scgi;
+
+    # WebSocket upgrade plumbing.
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    # Owner is the OpenHost zone owner (router-stamped, unspoofable).
+    map $http_x_openhost_is_owner $is_owner {
+        default 0;
+        "true"  1;
+    }
+
+    # Does the request already carry a Jupyter cookie?  If so, the
+    # browser is (or is trying to be) authenticated already and we
+    # must NOT loop it back through the token redirect.
+    map $http_cookie $has_jupyter_cookie {
+        default                    0;
+        "~*_xsrf="                 1;
+        "~*username-"              1;
+    }
+
+    # Only treat top-level HTML GETs as auto-login candidates.
+    map $http_accept $is_html_nav {
+        default        0;
+        "~*text/html"  1;
+    }
+
+    # Body size: notebooks + file uploads can be large.
+    client_max_body_size 512m;
+
+    upstream jupyter {
+        server 127.0.0.1:8888;
+    }
+
+    server {
+        listen 8080;
+        server_name _;
+
+        # Long timeouts: kernels can hold connections open.
+        proxy_read_timeout  86400s;
+        proxy_send_timeout  86400s;
+
+        # Health check: static 200 as soon as nginx is up, well
+        # before Jupyter finishes starting.
+        location = /_healthz {
+            add_header Content-Type text/plain;
+            return 200 "ok\n";
+        }
+
+        # Owner auto-login gate on the site root.  We compute a
+        # combined flag: owner AND html-nav AND no jupyter cookie.
+        location = / {
+            set $auto_login "${is_owner}${is_html_nav}${has_jupyter_cookie}";
+            # 1 (owner) + 1 (html) + 0 (no cookie) = "110"
+            if ($auto_login = "110") {
+                return 302 /lab?token=__JUPYTER_TOKEN__;
+            }
+            proxy_pass http://jupyter;
+            include /opt/openhost-jupyter/proxy_common.conf;
+        }
+
+        # Everything else (including /lab, /api, /terminals, and all
+        # WebSocket endpoints) is proxied straight through.
+        location / {
+            proxy_pass http://jupyter;
+            include /opt/openhost-jupyter/proxy_common.conf;
+        }
+    }
+}
