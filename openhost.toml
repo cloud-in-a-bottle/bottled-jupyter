@@ -1,0 +1,48 @@
+[app]
+name = "jupyter"
+version = "0.1.0"
+description = "JupyterLab multi-language notebook environment for OpenHost. Ships Python 3 and OCaml kernels out of the box and lets the owner install more kernels at runtime. The OpenHost zone owner is auto-signed-in to the JupyterLab web IDE; anonymous visitors are rejected by Jupyter's own token auth."
+authors = ["Andrew Laack <andrew@laack.co>"]
+
+[runtime.container]
+image = "Dockerfile"
+# nginx front-proxy port. JupyterLab runs on 127.0.0.1:8888 inside
+# the container; nginx listens on 8080 and is what the OpenHost
+# router forwards to (including WebSocket upgrades for kernels and
+# terminals).
+port = 8080
+
+[routing]
+# Static /_healthz served by nginx returns 200 as soon as nginx is
+# up, well before JupyterLab finishes importing. (OpenHost's deploy
+# readiness probe actually hits "/", which nginx also answers with
+# <500 immediately, but the declared health_check is here for the
+# on-demand diagnostics probe.)
+health_check = "/_healthz"
+# No public_paths: a live notebook kernel is arbitrary code
+# execution, so the entire app is owner-only. Jupyter has no native
+# read-only public-share model.
+
+[resources]
+# JupyterLab (Python) + the OCaml toolchain + one or more live
+# kernels. 2 GiB is a comfortable starting point; bump if running
+# many kernels or memory-heavy notebooks.
+memory_mb = 2048
+cpu_millicores = 1000
+
+[data]
+# Persistent state under /data/app_data/jupyter/:
+#   notebooks/       — the JupyterLab working directory (user files)
+#   jupyter-data/    — JUPYTER_DATA_DIR: kernelspecs (including any
+#                      the owner installs at runtime)
+#   jupyter-config/  — JUPYTER_CONFIG_DIR
+# No credential/token file is ever written under app_data.
+#
+# JUPYTER_RUNTIME_DIR (which holds jpserver-*.json with the live
+# token) is deliberately NOT placed under app_data OR app_temp_data:
+# both tiers are bind-mounted into any app with access_all_data
+# (file-browser), so neither isolates credentials.  It lives on the
+# container's own ephemeral /run instead.  app_temp_data is still
+# declared for non-sensitive scratch (e.g. build/runtime temp).
+app_data = true
+app_temp_data = true
