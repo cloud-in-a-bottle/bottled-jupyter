@@ -24,7 +24,12 @@
 # lives only in this process's environment + the (root-owned, /run)
 # nginx.conf.  It is NEVER written under $OPENHOST_APP_DATA_DIR, so
 # file-browser (and any other app with access_all_data) can't read a
-# usable credential.
+# usable credential.  jupyter_server's own runtime connection file
+# (jpserver-*.json), which also embeds the token, is written to
+# JUPYTER_RUNTIME_DIR = /run/jupyter-runtime.  Both app_data AND
+# app_temp_data are bind-mounted into access_all_data apps, so neither
+# is safe for credentials; /run is the container's own ephemeral fs
+# and is never mounted into another app.
 
 set -euo pipefail
 
@@ -36,18 +41,29 @@ NB_GID="$(id -g "$NB_USER")"
 NOTEBOOK_DIR="$PERSIST/notebooks"
 JUPYTER_DATA="$PERSIST/jupyter-data"
 JUPYTER_CONFIG="$PERSIST/jupyter-config"
-JUPYTER_RUNTIME="$PERSIST/jupyter-runtime"
+# Runtime dir holds jupyter_server's jpserver-<pid>.json, which embeds
+# the live auth token in plaintext.  It MUST NOT live under app_data
+# OR app_temp_data: BOTH of those tiers are bind-mounted (read/write)
+# into any app with access_all_data (e.g. file-browser), so neither
+# provides credential isolation.  /run is the container's own
+# ephemeral filesystem — never bind-mounted out — so a live token
+# there is invisible to other apps.
+JUPYTER_RUNTIME="/run/jupyter-runtime"
 
-# Clean up any stale credential file from earlier iterations of this
-# app (defence in depth; we never write one now).
+# Clean up any credential-bearing artifacts from earlier iterations of
+# this app that may have been written under app_data (defence in
+# depth; we never write them there now).  This includes any legacy
+# jupyter-runtime dir a prior version placed under $PERSIST.
 rm -f "$PERSIST/jupyter-token.txt" "$PERSIST/token" 2>/dev/null || true
+rm -rf "$PERSIST/jupyter-runtime" 2>/dev/null || true
 
 mkdir -p "$NOTEBOOK_DIR" "$JUPYTER_DATA" "$JUPYTER_CONFIG" "$JUPYTER_RUNTIME"
 
-# The bind-mounted persistent dir is owned by root on first boot;
-# hand it to the notebook user so JupyterLab (and runtime pip/opam
-# kernel installs) can write to it.
+# The bind-mounted dirs are owned by root on first boot; hand them to
+# the notebook user so JupyterLab (and runtime pip/opam kernel
+# installs) can write to them.
 chown -R "$NB_UID:$NB_GID" "$PERSIST" 2>/dev/null || true
+chown -R "$NB_UID:$NB_GID" "$JUPYTER_RUNTIME" 2>/dev/null || true
 
 # nginx scratch dirs (all under /tmp per nginx.conf.tmpl).
 mkdir -p /tmp/nginx-client-body /tmp/nginx-proxy /tmp/nginx-fastcgi \

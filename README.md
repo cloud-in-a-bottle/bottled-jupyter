@@ -35,6 +35,13 @@ nginx config under `/run`. It is **never** written under
 `$OPENHOST_APP_DATA_DIR`, so apps with `access_all_data` (e.g.
 file-browser) cannot read a usable credential.
 
+Note that `jupyter_server` writes its runtime connection file
+(`jpserver-*.json`), which also contains the live token, into
+`JUPYTER_RUNTIME_DIR`. We point that at `/run/jupyter-runtime` — the
+container's own ephemeral filesystem, never bind-mounted into another
+app. (Both `app_data` and `app_temp_data` are mounted into apps with
+`access_all_data`, so neither is a safe place for a live token.)
+
 ## Architecture
 
 ```
@@ -56,8 +63,11 @@ Everything under `/data/app_data/jupyter/`:
 
 - `notebooks/` — the JupyterLab working directory (your files)
 - `jupyter-data/` — `JUPYTER_DATA_DIR`: kernelspecs (including any you
-  install at runtime) + runtime state
-- `jupyter-config/`, `jupyter-runtime/` — Jupyter config/runtime dirs
+  install at runtime)
+- `jupyter-config/` — `JUPYTER_CONFIG_DIR`
+
+The Jupyter runtime dir (`JUPYTER_RUNTIME_DIR`) is deliberately kept
+off `app_data` — see the auth-model note above.
 
 ## Adding more kernels
 
