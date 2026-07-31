@@ -73,6 +73,15 @@ http {
         listen 8080;
         server_name _;
 
+        # The OpenHost router strips the external Host and forwards
+        # Host: 127.0.0.1:8080.  Without this, nginx would expand a
+        # relative redirect (return 302 /lab?...) into an absolute URL
+        # using that internal host, sending the browser to
+        # http://127.0.0.1:8080/... .  absolute_redirect off => nginx
+        # emits a path-only Location the browser resolves against the
+        # real external domain in its address bar.
+        absolute_redirect off;
+
         # Long timeouts: kernels can hold connections open.
         proxy_read_timeout  86400s;
         proxy_send_timeout  86400s;
