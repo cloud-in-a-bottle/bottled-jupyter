@@ -1,6 +1,6 @@
-# openhost-jupyter
+# bottled-jupyter
 
-JupyterLab multi-language notebook environment, packaged for OpenHost.
+JupyterLab multi-language notebook environment, packaged for Cloud in a Bottle.
 
 Ships a full JupyterLab web IDE (notebook editor, file browser,
 terminals, text editors) with two language kernels baked in:
@@ -13,10 +13,10 @@ restarts (see "Adding more kernels" below).
 
 ## Auth model
 
-The OpenHost zone owner is auto-signed-in; anonymous visitors are
+The Cloud in a Bottle zone owner is auto-signed-in; anonymous visitors are
 rejected.
 
-- The OpenHost router verifies the owner's `zone_auth` cookie and
+- The Cloud in a Bottle router verifies the owner's `zone_auth` cookie and
   stamps `X-OpenHost-Is-Owner: true` on the upstream request.
 - An nginx front proxy (`:8080`) sees the owner header on the first
   top-level HTML navigation, and — if no Jupyter cookie is present
@@ -54,7 +54,7 @@ browser
 
 nginx is used (rather than a pure-HTTP Python sidecar) because
 Jupyter's kernels and terminals communicate over WebSockets, which
-nginx proxies natively. The OpenHost router itself already forwards
+nginx proxies natively. The Cloud in a Bottle router itself already forwards
 WebSocket upgrades to the app port.
 
 ## Persistence
@@ -96,7 +96,7 @@ kernels or memory-heavy notebooks.
 ## Files
 
 - `Dockerfile` — Debian base + JupyterLab (venv) + OCaml/opam kernel
-- `openhost.toml` — OpenHost app manifest
+- `openhost.toml` — Cloud in a Bottle app manifest
 - `start.sh` — supervisor: generates the per-boot token, templates
   nginx.conf, launches nginx + JupyterLab
 - `nginx.conf.tmpl` — nginx front-proxy template (token substituted
