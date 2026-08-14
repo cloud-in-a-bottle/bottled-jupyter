@@ -1,7 +1,7 @@
 [app]
 name = "jupyter"
 version = "0.1.0"
-description = "JupyterLab multi-language notebook environment for OpenHost. Ships Python 3 and OCaml kernels out of the box and lets the owner install more kernels at runtime. The OpenHost zone owner is auto-signed-in to the JupyterLab web IDE; anonymous visitors are rejected by Jupyter's own token auth."
+description = "JupyterLab multi-language notebook environment for Cloud in a Bottle. Ships Python 3 and OCaml kernels out of the box and lets the owner install more kernels at runtime. The Cloud in a Bottle zone owner is auto-signed-in to the JupyterLab web IDE; anonymous visitors are rejected by Jupyter's own token auth."
 authors = ["Andrew Laack <andrew@laack.co>"]
 
 [runtime.container]
