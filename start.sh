@@ -8,17 +8,25 @@
 #     -> container :8080          (nginx, WebSocket-aware)
 #     -> 127.0.0.1:8888           (JupyterLab)
 #
-# Auth flow on first owner visit:
-#   1. Owner GETs / on jupyter.<zone>.  Router stamps
+# Auth flow on an owner visit:
+#   1. Owner GETs any page on jupyter.<zone>.  The router stamps
 #      X-OpenHost-Is-Owner: true.
-#   2. nginx sees owner + HTML nav + no Jupyter cookie and 302s to
-#      /lab?token=<TOKEN>.
-#   3. Jupyter validates the token, mints its own _xsrf cookie, and
-#      the owner lands in JupyterLab authenticated.  Subsequent
-#      requests carry the cookie, so the token redirect doesn't fire
-#      again.
-#   Anonymous (non-owner) visitors never get the token; Jupyter's own
-#   auth rejects them.  There are no public paths.
+#   2. If that navigation has no Jupyter session cookie, nginx 302s it
+#      to the same URL with ?token=<TOKEN> appended.
+#   3. Jupyter validates the token, mints its own session + _xsrf
+#      cookies, and the owner lands in JupyterLab authenticated.
+#      Subsequent requests carry the cookie, so no further redirects.
+#   4. If a session cookie is present but no longer valid — every
+#      restart mints a new cookie_secret, since JUPYTER_RUNTIME_DIR is
+#      on the ephemeral /run — Jupyter 302s the navigation to
+#      /login?next=<original>, and nginx re-runs step 2 from there.
+#      Jupyter honours ?token= on /login, so the owner is signed back
+#      in and forwarded to where they were going without ever seeing
+#      the login form (which they could not get past: the token is the
+#      only credential and they never see it).
+#   Anonymous (non-owner) visitors never get the token; the router
+#   rejects them before the app, and Jupyter's own auth rejects them
+#   after.  There are no public paths.
 #
 # Security note: the Jupyter token is generated fresh each boot and
 # lives only in this process's environment + the (root-owned, /run)
@@ -29,7 +37,10 @@
 # JUPYTER_RUNTIME_DIR = /run/jupyter-runtime.  Both app_data AND
 # app_temp_data are bind-mounted into access_all_data apps, so neither
 # is safe for credentials; /run is the container's own ephemeral fs
-# and is never mounted into another app.
+# and is never mounted into another app.  jupyter_server's
+# cookie_secret_file defaults to JUPYTER_RUNTIME_DIR too, so it is
+# likewise unreadable from other apps — at the cost of a new
+# cookie_secret each boot, which the auto-login flow above absorbs.
 
 set -euo pipefail
 

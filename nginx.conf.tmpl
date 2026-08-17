@@ -1,21 +1,56 @@
-# nginx front proxy for OpenHost JupyterLab.
+# nginx front proxy for the Cloud in a Bottle JupyterLab app.
 #
 # Substituted at boot by start.sh:
 #   __JUPYTER_TOKEN__  -> the per-boot Jupyter auth token
 #
 # Responsibilities:
-#   * Terminate the OpenHost-routed :8080 connection.
+#   * Terminate the router-forwarded :8080 connection.
 #   * Proxy HTTP + WebSocket traffic to JupyterLab on 127.0.0.1:8888.
 #   * Serve a static 200 on /_healthz (declared health_check).
-#   * Auto-login the OpenHost owner: on a top-level HTML navigation
-#     where the visitor is the owner (X-OpenHost-Is-Owner: true) and
-#     has no Jupyter cookie yet, 302 them to /lab?token=<TOKEN> so
-#     Jupyter mints its own XSRF/session cookie.  Anonymous visitors
-#     never receive the token and hit Jupyter's own login page (403).
+#   * Keep the zone owner signed in to JupyterLab.
 #
-# Note: the OpenHost router strips the inbound Host header (the app
-# sees Host: 127.0.0.1:8080), so we forward X-Forwarded-Host onward
-# and disable Jupyter host-checking in start.sh instead.
+# Owner auto-login
+# ----------------
+# Jupyter's only credential is the per-boot token, and the owner never
+# sees it, so Jupyter's own login page is a dead end for them: there is
+# nothing they can type into it.  This proxy must therefore make sure a
+# top-level navigation by the owner NEVER ends on that page.
+#
+# Two rules do that:
+#
+#   1. An owner HTML navigation carrying no Jupyter session cookie is
+#      bounced to the same URL with ?token=<TOKEN> appended, so Jupyter
+#      authenticates it and mints its own session cookie.
+#
+#   2. Any owner HTML navigation to /login is bounced the same way.
+#      Jupyter redirects every unauthenticated navigation to
+#      /login?next=<original>, so this catches what rule 1 cannot see:
+#      a session cookie that is present but no longer valid.  That is
+#      the normal state after a restart — jupyter_server keeps its
+#      cookie_secret in JUPYTER_RUNTIME_DIR, which lives on the
+#      container's ephemeral /run (deliberately: it also holds the
+#      token), so every boot invalidates every session cookie already
+#      in the wild.  Jupyter honours ?token= on /login and then
+#      redirects to ?next=, so the owner still lands where they were
+#      headed.
+#
+# Do NOT use the _xsrf cookie as the "is signed in" signal.  Jupyter
+# hands an _xsrf cookie to *anonymous* visitors when it renders the
+# login page (and, once signed in, sets it for 30 days).  Treating it
+# as a session marker is what used to wedge owners out of the app for
+# good: one look at the login page — a bookmarked deep link, a restored
+# tab, or any restart — suppressed auto-login from then on and left the
+# owner stuck on a login form with no credential to enter.  Only the
+# "username-<host>" identity cookie means "signed in".
+#
+# Anonymous visitors are stopped by the router before they reach this
+# proxy (the app declares no public paths), and nothing here hands out
+# the token unless the router stamped X-OpenHost-Is-Owner: true, which
+# it strips from inbound requests so it cannot be forged.
+#
+# Note: the router strips the inbound Host header (the app sees
+# Host: 127.0.0.1:8080), so we forward X-Forwarded-Host onward and
+# disable Jupyter host-checking in start.sh instead.
 
 worker_processes 1;
 error_log /dev/stderr warn;
@@ -41,25 +76,99 @@ http {
         ''      close;
     }
 
-    # Owner is the OpenHost zone owner (router-stamped, unspoofable).
+    # The router forwards the external host and scheme.  Fall back to
+    # this hop's own values so a direct request to :8080 (a readiness or
+    # diagnostics probe) still gets a sane Host, and so Jupyter doesn't
+    # mark its cookies Secure on a plain-http (.local) zone — a Secure
+    # cookie the browser drops would break the login flow entirely.
+    map $http_x_forwarded_host $forwarded_host {
+        default $http_x_forwarded_host;
+        ''      $http_host;
+    }
+    map $http_x_forwarded_proto $forwarded_proto {
+        default $http_x_forwarded_proto;
+        ''      https;
+    }
+
+    # ---- owner auto-login inputs -------------------------------------
+
+    # Router-stamped and unspoofable: the router strips client-supplied
+    # X-OpenHost-* headers and re-adds this one only for the zone owner.
     map $http_x_openhost_is_owner $is_owner {
         default 0;
-        "true"  1;
+        'true'  1;
     }
 
-    # Does the request already carry a Jupyter cookie?  If so, the
-    # browser is (or is trying to be) authenticated already and we
-    # must NOT loop it back through the token redirect.
-    map $http_cookie $has_jupyter_cookie {
-        default                    0;
-        "~*_xsrf="                 1;
-        "~*username-"              1;
+    # Only plain GETs that ask for HTML are auto-login candidates, so
+    # XHR/fetch calls, asset loads and WebSocket upgrades are never
+    # redirected (JupyterLab would choke on an HTML page in reply).
+    map $request_method $is_get {
+        default 0;
+        GET     1;
+    }
+    map $http_accept $wants_html {
+        default       0;
+        '~*text/html' 1;
     }
 
-    # Only treat top-level HTML GETs as auto-login candidates.
-    map $http_accept $is_html_nav {
-        default        0;
-        "~*text/html"  1;
+    # Jupyter's identity cookie is "username-<host>", with non-alphanum
+    # characters replaced by "-".  It is the ONLY cookie that means
+    # "signed in" — see the header comment about _xsrf.
+    map $http_cookie $has_jupyter_session {
+        default                        0;
+        '~*(?:^|;\s*)username-[^=;]*=' 1;
+    }
+
+    # A request that already carries ?token= must not be re-stamped:
+    # Jupyter reads the first token in the query string, so appending a
+    # second one would keep replaying a stale token forever.
+    map $arg_token $has_token_arg {
+        default 1;
+        ''      0;
+    }
+
+    # Loop breaker.  Set for a few seconds when we hand out a token
+    # redirect; if it comes back to us, the redirect did not stick (a
+    # browser refusing Jupyter's Set-Cookie), so we stop redirecting and
+    # let Jupyter answer for itself rather than bouncing the browser
+    # around a loop.  It expires on its own, so the next visit retries.
+    map $http_cookie $autologin_tried {
+        default                                    0;
+        '~*(?:^|;\s*)openhost_jupyter_autologin=1' 1;
+    }
+
+    # Only ever redirect to a plain local path: "//host" in a Location
+    # is scheme-relative, and we must never send the token off-site.
+    map $request_uri $is_local_target {
+        default          0;
+        '~^/(?:[^/]|$)'  1;
+    }
+
+    # How to append the token to a URL that may already have a query.
+    map $is_args $token_query {
+        default '&token=__JUPYTER_TOKEN__';
+        ''      '?token=__JUPYTER_TOKEN__';
+    }
+
+    # An owner navigation we are allowed to bounce through the token.
+    map '$is_owner$is_get$wants_html$is_local_target$autologin_tried' $owner_html_nav {
+        default 0;
+        '11110' 1;
+    }
+
+    # Off /login we bounce only when there is no session cookie at all
+    # (otherwise every request would redirect) and no token in the URL.
+    map '$owner_html_nav$has_jupyter_session$has_token_arg' $autologin_now {
+        default 0;
+        '100'   1;
+    }
+
+    # On /login, a stale ?token= in the URL is the reason we are here,
+    # so drop the query and send the owner to /lab with a fresh token
+    # instead of stacking tokens.
+    map $has_token_arg $login_target {
+        default '/lab?token=__JUPYTER_TOKEN__';
+        '0'     '$request_uri$token_query';
     }
 
     # Body size: notebooks + file uploads can be large.
@@ -73,7 +182,7 @@ http {
         listen 8080;
         server_name _;
 
-        # The OpenHost router strips the external Host and forwards
+        # The router strips the external Host and forwards
         # Host: 127.0.0.1:8080.  Without this, nginx would expand a
         # relative redirect (return 302 /lab?...) into an absolute URL
         # using that internal host, sending the browser to
@@ -86,28 +195,36 @@ http {
         proxy_read_timeout  86400s;
         proxy_send_timeout  86400s;
 
-        # Health check: static 200 as soon as nginx is up, well
-        # before Jupyter finishes starting.
+        # Keep URLs that carry ?token= out of third-party Referer
+        # headers (JupyterLab pulls MathJax from a CDN).
+        add_header Referrer-Policy same-origin always;
+
+        # Health check: static 200 as soon as nginx is up, well before
+        # Jupyter finishes starting.
         location = /_healthz {
             add_header Content-Type text/plain;
             return 200 "ok\n";
         }
 
-        # Owner auto-login gate on the site root.  We compute a
-        # combined flag: owner AND html-nav AND no jupyter cookie.
-        location = / {
-            set $auto_login "${is_owner}${is_html_nav}${has_jupyter_cookie}";
-            # 1 (owner) + 1 (html) + 0 (no cookie) = "110"
-            if ($auto_login = "110") {
-                return 302 /lab?token=__JUPYTER_TOKEN__;
+        # Rule 2: Jupyter sends every unauthenticated navigation here,
+        # so this is the catch-all that keeps the owner off the login
+        # form no matter which stale cookies their browser is holding.
+        location ^~ /login {
+            if ($owner_html_nav) {
+                add_header Set-Cookie 'openhost_jupyter_autologin=1; Path=/; Max-Age=10; HttpOnly; SameSite=Lax';
+                return 302 $login_target;
             }
             proxy_pass http://jupyter;
             include /opt/openhost-jupyter/proxy_common.conf;
         }
 
-        # Everything else (including /lab, /api, /terminals, and all
-        # WebSocket endpoints) is proxied straight through.
+        # Rule 1, plus everything else (/, /lab, /api, /terminals and
+        # all the WebSocket endpoints) proxied straight through.
         location / {
+            if ($autologin_now) {
+                add_header Set-Cookie 'openhost_jupyter_autologin=1; Path=/; Max-Age=10; HttpOnly; SameSite=Lax';
+                return 302 $request_uri$token_query;
+            }
             proxy_pass http://jupyter;
             include /opt/openhost-jupyter/proxy_common.conf;
         }
